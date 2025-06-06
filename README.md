@@ -1,21 +1,18 @@
 # Tasks Telegram Bot
 
-This repository contains a simple Telegram bot built with **aiogram** and
-**SQLite** for managing tasks posted in a Telegram channel. It allows
-administrators to keep track of posts, assign responsible workers and view
-monthly statistics.
+This bot helps Telegram channel administrators keep track of content tasks. It is built with **aiogram 3** and **SQLite** and is compatible with **Python 3.11**.
 
 ## Features
 
-- Automatic capture of text posts from a channel where the bot is an admin.
-- Manual task creation via command.
-- Assign workers and task type to captured posts.
-- Filter tasks by type, worker or month.
+- Captures text posts from a channel (bot must be an administrator).
+- Add tasks manually through a button based conversation.
+- Assign workers and task type with inline buttons.
+- View all tasks or only unassigned ones.
 - Monthly statistics of completed tasks per worker.
 
 ## Installation
 
-1. Install dependencies:
+1. Install Python 3.11 and the dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -27,8 +24,7 @@ pip install -r requirements.txt
 export BOT_TOKEN=<your_bot_token>
 ```
 
-Optional: change the database file location using `DB_PATH` environment
-variable.
+(Optional) specify a different database file using the `DB_PATH` environment variable.
 
 ## Running
 
@@ -36,5 +32,9 @@ variable.
 python bot.py
 ```
 
-The bot must be added to your channel as an administrator to capture posts.
-Use `/help` inside Telegram to list available commands.
+Add the bot to your channel as an administrator so it can read posts. Send `/start` in a private chat with the bot to open the menu. Use the buttons:
+
+- **Add task** – create a new task by selecting its type and entering worker and title.
+- **Unassigned** – list channel posts that are not yet assigned and quickly assign them.
+- **Tasks** – show all stored tasks.
+- **Stats** – enter a month (`YYYY-MM`) to see each worker's contribution.
