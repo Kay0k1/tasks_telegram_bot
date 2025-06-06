@@ -1,129 +1,186 @@
-import os
-import logging
-from aiogram import Bot, Dispatcher, executor, types
 import asyncio
+import logging
+import os
+from typing import List
+
+from aiogram import Bot, Dispatcher, F, Router, types
+from aiogram.filters import Command
+from aiogram.types import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
 from db import Database
 
 API_TOKEN = os.getenv("BOT_TOKEN")
+DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
-DB_PATH = os.getenv("DB_PATH", "bot.db")
 db = Database(DB_PATH)
 
 TASK_TYPES = ["news", "meme", "selection", "longread"]
 
+main_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Add task")],
+        [KeyboardButton(text="Unassigned"), KeyboardButton(text="Tasks")],
+        [KeyboardButton(text="Stats")],
+    ],
+    resize_keyboard=True,
+)
 
-async def on_startup(dp):
-    await db.connect()
+
+class AddTask(StatesGroup):
+    type = State()
+    worker = State()
+    title = State()
 
 
-@dp.message_handler(commands=["start"])
+class AssignTask(StatesGroup):
+    task_id = State()
+    worker = State()
+    type = State()
+
+
+class StatsQuery(StatesGroup):
+    month = State()
+
+
+@router.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.reply(
-        "Task Manager Bot. Use /add_task, /unassigned, /assign, /tasks, /stats"
-    )
+    await message.answer("Task Manager Bot", reply_markup=main_kb)
 
 
-@dp.channel_post_handler(content_types=types.ContentType.TEXT)
+@router.channel_post(F.content_type == types.ContentType.TEXT)
 async def on_channel_post(message: types.Message):
     title = message.text.strip()
     await db.add_task(title=title, message_id=message.message_id, chat_id=message.chat.id)
 
 
-@dp.message_handler(commands=["add_worker"])
-async def cmd_add_worker(message: types.Message):
-    parts = message.get_args().split()
-    if not parts:
-        await message.reply("Usage: /add_worker <name>")
-        return
-    worker_name = " ".join(parts)
-    worker_id = await db.add_worker(worker_name)
-    await message.reply(f"Worker {worker_name} has id {worker_id}")
+@router.message(F.text.casefold() == "add task")
+async def start_add_task(message: types.Message, state: FSMContext):
+    buttons = [
+        [InlineKeyboardButton(text=t.capitalize(), callback_data=f"atype:{t}") for t in TASK_TYPES]
+    ]
+    await message.answer("Select task type", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await state.set_state(AddTask.type)
 
 
-@dp.message_handler(commands=["add_task"])
-async def cmd_add_task(message: types.Message):
-    args = message.get_args().split()
-    if len(args) < 3:
-        await message.reply("Usage: /add_task <type> <worker> <title>")
-        return
-    task_type, worker_name = args[0], args[1]
-    title = " ".join(args[2:])
-    if task_type not in TASK_TYPES:
-        await message.reply(f"Unknown type. Available: {', '.join(TASK_TYPES)}")
-        return
-    task_id = await db.add_task(title, task_type, worker_name)
-    await message.reply(f"Task #{task_id} added")
+@router.callback_query(AddTask.type, F.data.startswith("atype:"))
+async def add_task_type(callback: types.CallbackQuery, state: FSMContext):
+    task_type = callback.data.split(":", 1)[1]
+    await state.update_data(type=task_type)
+    await callback.message.answer("Enter worker name")
+    await state.set_state(AddTask.worker)
+    await callback.answer()
 
 
-@dp.message_handler(commands=["unassigned"])
-async def cmd_unassigned(message: types.Message):
+@router.message(AddTask.worker)
+async def add_task_worker(message: types.Message, state: FSMContext):
+    await state.update_data(worker=message.text.strip())
+    await message.answer("Enter task title")
+    await state.set_state(AddTask.title)
+
+
+@router.message(AddTask.title)
+async def add_task_title(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    task_type = data.get("type")
+    worker = data.get("worker")
+    title = message.text.strip()
+    task_id = await db.add_task(title, task_type, worker)
+    await message.answer(f"Task #{task_id} added", reply_markup=main_kb)
+    await state.clear()
+
+
+@router.message(F.text.casefold() == "unassigned")
+async def list_unassigned(message: types.Message):
     rows = await db.get_unassigned_tasks()
     if not rows:
-        await message.reply("No unassigned posts")
+        await message.answer("No unassigned posts")
         return
-    text = "Unassigned posts:\n" + "\n".join(f"{r[0]}: {r[1][:40]}" for r in rows)
-    await message.reply(text)
+    for task_id, title in rows:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Assign", callback_data=f"assign:{task_id}")]]
+        )
+        await message.answer(f"{task_id}: {title[:40]}", reply_markup=kb)
 
 
-@dp.message_handler(commands=["assign"])
-async def cmd_assign(message: types.Message):
-    args = message.get_args().split()
-    if len(args) < 3:
-        await message.reply("Usage: /assign <task_id> <worker> <type>")
-        return
-    task_id = int(args[0])
-    worker = args[1]
-    task_type = args[2]
-    if task_type not in TASK_TYPES:
-        await message.reply(f"Type must be one of: {', '.join(TASK_TYPES)}")
-        return
+@router.callback_query(F.data.startswith("assign:"))
+async def assign_start(callback: types.CallbackQuery, state: FSMContext):
+    task_id = int(callback.data.split(":", 1)[1])
+    await state.update_data(task_id=task_id)
+    await callback.message.answer("Enter worker name")
+    await state.set_state(AssignTask.worker)
+    await callback.answer()
+
+
+@router.message(AssignTask.worker)
+async def assign_worker(message: types.Message, state: FSMContext):
+    await state.update_data(worker=message.text.strip())
+    buttons = [
+        [InlineKeyboardButton(text=t.capitalize(), callback_data=f"astype:{t}") for t in TASK_TYPES]
+    ]
+    await message.answer("Select task type", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await state.set_state(AssignTask.type)
+
+
+@router.callback_query(AssignTask.type, F.data.startswith("astype:"))
+async def assign_type(callback: types.CallbackQuery, state: FSMContext):
+    task_type = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    task_id = data.get("task_id")
+    worker = data.get("worker")
     await db.assign_task(task_id, worker, task_type)
-    await message.reply("Assigned")
+    await callback.message.answer("Assigned", reply_markup=main_kb)
+    await state.clear()
+    await callback.answer()
 
 
-@dp.message_handler(commands=["tasks"])
-async def cmd_tasks(message: types.Message):
-    params = message.get_args().split()
-    kwargs = {}
-    for p in params:
-        if p.startswith("type="):
-            kwargs["task_type"] = p.split("=", 1)[1]
-        elif p.startswith("worker="):
-            kwargs["worker_name"] = p.split("=", 1)[1]
-        elif p.startswith("month="):
-            kwargs["month"] = p.split("=", 1)[1]
-    rows = await db.get_tasks(**kwargs)
+@router.message(F.text.casefold() == "tasks")
+async def list_tasks(message: types.Message):
+    rows = await db.get_tasks()
     if not rows:
-        await message.reply("No tasks found")
+        await message.answer("No tasks found")
         return
-    lines = []
-    for r in rows:
-        task_id, title, ttype, worker, created = r
+    lines: List[str] = []
+    for task_id, title, ttype, worker, created in rows:
         lines.append(f"{task_id}. [{ttype or '-'}] {title} - {worker or 'unassigned'}")
-    await message.reply("\n".join(lines))
+    await message.answer("\n".join(lines))
 
 
-@dp.message_handler(commands=["stats"])
-async def cmd_stats(message: types.Message):
-    month = message.get_args().strip()
-    if not month:
-        await message.reply("Usage: /stats <YYYY-MM>")
-        return
+@router.message(F.text.casefold() == "stats")
+async def stats_request(message: types.Message, state: FSMContext):
+    await message.answer("Enter month as YYYY-MM")
+    await state.set_state(StatsQuery.month)
+
+
+@router.message(StatsQuery.month)
+async def show_stats(message: types.Message, state: FSMContext):
+    month = message.text.strip()
     rows = await db.worker_stats(month)
     if not rows:
-        await message.reply("No data for this month")
-        return
-    text = "Stats for " + month + "\n"
-    text += "\n".join(f"{name}: {count}" for name, count in rows)
-    await message.reply(text)
+        await message.answer("No data for this month", reply_markup=main_kb)
+    else:
+        text = "Stats for " + month + "\n" + "\n".join(f"{name}: {count}" for name, count in rows)
+        await message.answer(text, reply_markup=main_kb)
+    await state.clear()
+
+
+async def main() -> None:
+    await db.connect()
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(db.connect())
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    asyncio.run(main())
